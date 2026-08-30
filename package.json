@@ -1,6 +1,6 @@
 {
   "name": "lingie-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "灵姬（Lingie）MCP 服务器 — 让 AI Agent 通过 MCP 直接调用灵姬客户端生成图片/视频/音频",
   "type": "module",
   "private": true,

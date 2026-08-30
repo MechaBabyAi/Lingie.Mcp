@@ -65,7 +65,8 @@ node Lingie.Mcp/server.mjs
 | `lingie_health` | 检查灵姬本地 API 与本地 ComfyUI 引擎是否在线 |
 | `lingie_list_workflows` | 列出可用工作流（图片/视频/音频生成等） |
 | `lingie_workflow_capabilities` | 查看某工作流的参数模式（类型/必填/默认值/可选值/提交方式） |
-| `lingie_run_workflow` | 执行工作流并等待完成，输出文件下载后以**本地绝对路径**返回；`wait=false` 可异步提交 |
+| `lingie_run_workflow` | 执行工作流：约 20 秒内完成则直接返回输出文件**本地绝对路径**，否则自动降级返回 `run_id`（任务后台继续）；`wait=false` 可立即异步提交 |
+| `lingie_run_result` | 轮询 `run_id` 并取回结果：完成时下载输出并以本地路径返回（配合降级流程使用） |
 | `lingie_run_status` | 查询任务状态与进度（不下载输出） |
 | `lingie_cancel_run` | 取消任务（注意：会中断本地引擎当前正在执行的任务） |
 | `lingie_upload_file` | 上传本地文件到 ComfyUI 输入目录（供图生图/参考图/首帧等参数使用） |
@@ -78,7 +79,7 @@ node Lingie.Mcp/server.mjs
 | 工具 | 说明 |
 |---|---|
 | `lingie_list_models` | 列出网关可用模型（model_code） |
-| `lingie_generate_image` / `lingie_generate_video` | 一键调用模型生成图片/视频 |
+| `lingie_generate_image` / `lingie_generate_video` | 一键调用模型生成图片/视频（约 20 秒未完成自动降级返回 `task_id`，用 `lingie_task_status` 轮询） |
 | `lingie_task_status` / `lingie_cancel_task` | 网关任务状态/取消 |
 | `lingie_estimate_cost` / `lingie_spirit_balance` | 灵力值估价/余额 |
 
@@ -89,6 +90,7 @@ node Lingie.Mcp/server.mjs
 | `LINGIE_API_PORT` | settings.json 的 `LocalApiPort`（默认 17856） | 工作流 API 端口 |
 | `LINGIE_API_TOKEN` | settings.json 的 `LocalApiBearerToken` | 工作流 API Bearer Token |
 | `LINGIE_MCP_OUTPUT_DIR` | `%LOCALAPPDATA%\Lingie\mcp-outputs` | 输出文件下载目录 |
+| `LINGIE_MCP_MAX_BLOCK_MS` | `20000` | 阻塞等待的安全窗口（毫秒）：超过仍未完成就提前降级返回 `run_id`/`task_id`，避免被宿主约 30 秒的单次调用超时掐断丢结果；设 `0` 关闭限制 |
 | `LINGIE_MCP_LOG` | `%LOCALAPPDATA%\Lingie\mcp-server.log` | 本地文件日志路径，设为 `off` 关闭；超 5MB 自动轮转为 `.old` |
 | `LINGIE_GATEWAY_APP_KEY` | 灵姬签发的 `mcp-credentials.json` | 网关 AppKey（与 `LINGIE_GATEWAY_USER_TOKEN` 一起设置后启用网关工具） |
 | `LINGIE_GATEWAY_USER_TOKEN` | 无 | 网关 Bearer 用户令牌 |
@@ -101,9 +103,17 @@ node Lingie.Mcp/server.mjs
 2. lingie_list_workflows                  → 找到想用的工作流（如"文生图"）
 3. lingie_workflow_capabilities           → 了解参数怎么填
 4. （可选）lingie_upload_file              → 图生图先上传参考图
-5. lingie_run_workflow { params }         → 等待生成，拿到输出文件本地路径
+5. lingie_run_workflow { params }         → 提交生成：
+   ├─ 约 20 秒内完成 → 直接拿到输出文件本地路径，结束
+   └─ 超过约 20 秒   → 拿到 run_id（降级返回，任务后台继续）
+      5a. 循环 lingie_run_result { run_id }  → 进行中则稍后再查；
+          完成时返回输出文件本地路径
 6. Agent 直接 Read / 处理该路径下的图片或视频
 ```
+
+> 为什么会"降级"？多数 MCP 宿主（ZCode、Claude Desktop 等）对单次工具调用有 ~30 秒超时，
+> 超时后客户端会掐断调用并丢弃返回值，但任务在灵姬后台仍在继续。与其被掐断，
+> 不如主动提前返回任务 id 让 Agent 轮询。视频生成等长任务几乎总会走降级路径，属正常现象。
 
 ## 已知限制
 

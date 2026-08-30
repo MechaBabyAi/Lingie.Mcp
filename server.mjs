@@ -28,7 +28,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 
 const SERVER_NAME = 'lingie-mcp';
-const SERVER_VERSION = '0.1.0';
+const SERVER_VERSION = '0.2.0';
 const KNOWN_PROTOCOL_VERSIONS = ['2024-11-05', '2025-03-26', '2025-06-18'];
 const LATEST_PROTOCOL_VERSION = '2025-06-18';
 
@@ -109,6 +109,13 @@ async function gatewayConfig() {
 }
 
 const OUTPUT_DIR = ENV('LINGIE_MCP_OUTPUT_DIR', path.join(lingieDir, 'mcp-outputs'));
+
+// 阻塞等待的安全窗口（毫秒）。多数 MCP 宿主（如 ZCode）对单次 tools/call 只等 ~30 秒，
+// 超时后客户端会掐断调用并丢弃返回值，而任务在灵姬后台其实仍在继续 —— 与其被掐断丢结果，
+// 不如主动降级：等待超过本窗口仍未完成时，立即返回 run_id/task_id 与轮询指引。
+// 设为 0 关闭该限制（宿主无单次调用超时限制时）。
+const RAW_MAX_BLOCK_MS = ENV('LINGIE_MCP_MAX_BLOCK_MS', '20000');
+const MAX_BLOCK_MS = RAW_MAX_BLOCK_MS === '0' ? 0 : Number(RAW_MAX_BLOCK_MS) > 0 ? Number(RAW_MAX_BLOCK_MS) : 20_000;
 
 // ────────────────────────────── 文件日志 ──────────────────────────────
 // 默认 %LOCALAPPDATA%\Lingie\mcp-server.log；LINGIE_MCP_LOG 指定其他路径，"off" 关闭。
@@ -245,6 +252,18 @@ async function downloadOutput(base, headers, runId, out, destDir) {
   return dest;
 }
 
+/** 把一个已完成 run 的输出清单下载到本地，返回 { destDir, files } */
+async function downloadRunOutputs(base, headers, runId, final) {
+  const destDir = path.join(OUTPUT_DIR, safeName(runId));
+  await fsp.mkdir(destDir, { recursive: true });
+  const files = [];
+  for (const out of final.outputs || []) {
+    const p = await downloadOutput(base, headers, runId, out, destDir);
+    files.push({ index: out.index, kind: out.kind, filename: out.filename, path: p });
+  }
+  return { destDir, files };
+}
+
 // ────────────────────────────── 轮询 ──────────────────────────────
 
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
@@ -259,9 +278,12 @@ async function sleep(ms, signal) {
 
 /**
  * 轮询直到任务进入终态或超时。前 10 秒容忍 "Run not found"（提交后短暂不可见）。
+ * blockWindowMs > 0 时：超过该窗口仍未到终态则提前返回当前状态（非终态），
+ * 由调用方降级处理，避免超出 MCP 宿主的单次调用超时。
  */
-async function pollUntilDone(fetchStatus, { timeoutS = 1200, progress, signal, notFoundGraceMs = 10_000 }) {
+async function pollUntilDone(fetchStatus, { timeoutS = 1200, progress, signal, notFoundGraceMs = 10_000, blockWindowMs = 0 }) {
   const deadline = Date.now() + timeoutS * 1000;
+  const windowEnd = blockWindowMs > 0 ? Date.now() + blockWindowMs : Infinity;
   const started = Date.now();
   let last = null;
   for (;;) {
@@ -274,6 +296,8 @@ async function pollUntilDone(fetchStatus, { timeoutS = 1200, progress, signal, n
       throw new LingieError(`任务不存在: ${last.error}`, { hint: 'run_id 可能不正确，或灵姬已重启导致内存任务丢失。' });
     } else if (last && TERMINAL_STATUSES.has(last.status)) {
       return last;
+    } else if (last?.status && Date.now() >= windowEnd) {
+      return last; // 非终态但已超出安全阻塞窗口 → 调用方降级返回
     } else if (last?.status) {
       const pct = Math.max(0, Math.min(100, Math.round((Number(last.progress) || 0) * 100)));
       await progress?.(pct, 100, `生成中 ${pct}%（状态: ${last.status}）`);
@@ -393,7 +417,7 @@ async function buildTools() {
     name: 'lingie_run_workflow',
     backend: 'workflow',
     description:
-      '在灵姬中执行一个工作流（本地 ComfyUI 引擎）并等待完成，返回输出文件（图片/视频/音频）的本地路径。默认阻塞等待最多 20 分钟；设 wait=false 可立即返回 run_id，之后用 lingie_run_status 查询。取消请用 lingie_cancel_run（注意：会中断本地引擎当前正在执行的任务）。',
+      '在灵姬中执行一个工作流（本地 ComfyUI 引擎）。提交后默认等待完成并返回输出文件的本地路径；若约 20 秒内未完成（MCP 宿主对单次调用通常只有 ~30 秒超时，超时会被掐断丢结果），自动降级为返回 run_id，任务在后台继续，用 lingie_run_result 轮询并在完成后取回本地文件。设 wait=false 立即返回 run_id。取消用 lingie_cancel_run（注意：会中断本地引擎当前正在执行的任务）。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -404,8 +428,8 @@ async function buildTools() {
             '工作流参数，键为 lingie_workflow_capabilities 返回的参数名（特殊类型按其 submission_hint 提交，如 "节点ID.字段" 形式）。',
           additionalProperties: true,
         },
-        wait: { type: 'boolean', description: '是否阻塞等待完成，默认 true' },
-        timeout_seconds: { type: 'integer', description: 'wait=true 时的最长等待秒数，默认 1200，最大 3600' },
+        wait: { type: 'boolean', description: '是否阻塞等待完成，默认 true（约 20 秒未完成自动降级返回，可用 LINGIE_MCP_MAX_BLOCK_MS 调整）' },
+        timeout_seconds: { type: 'integer', description: 'wait=true 时的总等待上限秒数，默认 1200，最大 3600' },
       },
       required: ['workflow_id'],
       additionalProperties: false,
@@ -442,29 +466,36 @@ async function buildTools() {
           });
           return r.json;
         },
-        { timeoutS, progress: ctx.progress, signal: ctx.signal },
+        { timeoutS, progress: ctx.progress, signal: ctx.signal, blockWindowMs: MAX_BLOCK_MS },
       );
 
-      if (final.status !== 'completed') {
-        throw new LingieError(`生成${final.status === 'failed' ? '失败' : '被取消'}: ${final.error || final.status}`, {
-          payload: final,
-        });
+      if (final && TERMINAL_STATUSES.has(final.status)) {
+        if (final.status !== 'completed') {
+          throw new LingieError(`生成${final.status === 'failed' ? '失败' : '被取消'}: ${final.error || final.status}`, {
+            payload: final,
+          });
+        }
+
+        // 下载输出到本地
+        const { destDir, files } = await downloadRunOutputs(cfg.base, wfHeaders, runId, final);
+        await ctx.progress?.(100, 100, `完成，共 ${files.length} 个输出文件`);
+
+        const lines = files.map((f) => `- [${f.kind}] ${f.filename} → ${f.path}`);
+        return {
+          text: `生成完成，输出已保存到 ${destDir}：\n${lines.join('\n') || '（工作流未返回输出文件）'}`,
+          data: { run_id: runId, outputs_dir: destDir, files },
+        };
       }
 
-      // 下载输出到本地
-      const destDir = path.join(OUTPUT_DIR, safeName(runId));
-      await fsp.mkdir(destDir, { recursive: true });
-      const files = [];
-      for (const out of final.outputs || []) {
-        const p = await downloadOutput(cfg.base, wfHeaders, runId, out, destDir);
-        files.push({ index: out.index, kind: out.kind, filename: out.filename, path: p });
-      }
-      await ctx.progress?.(100, 100, `完成，共 ${files.length} 个输出文件`);
-
-      const lines = files.map((f) => `- [${f.kind}] ${f.filename} → ${f.path}`);
+      // 仍在生成中：在宿主掐断调用之前主动降级，返回 run_id 让调用方轮询
+      const pct = final ? Math.round((Number(final.progress) || 0) * 100) : 0;
+      const st = final?.status ?? 'submitted';
       return {
-        text: `生成完成，输出已保存到 ${destDir}：\n${lines.join('\n') || '（工作流未返回输出文件）'}`,
-        data: { run_id: runId, outputs_dir: destDir, files },
+        text:
+          `任务已提交，仍在生成中（状态 ${st}${final ? `，进度 ${pct}%` : ''}）。\n` +
+          `为避免 MCP 宿主约 30 秒的调用超时丢失结果，这里提前返回，任务在灵姬后台继续执行：run_id=${runId}\n` +
+          `稍后用 lingie_run_result(run_id="${runId}") 查询进度，完成时它会下载并返回本地文件路径；取消用 lingie_cancel_run。`,
+        data: { run_id: runId, status: st, progress: pct, degraded: true },
       };
     },
   });
@@ -487,6 +518,45 @@ async function buildTools() {
       return {
         text: `任务 ${run_id}：状态=${data.status}，进度=${Math.round((Number(data.progress) || 0) * 100)}%${data.error ? `，错误=${data.error}` : ''}${outs.length ? `\n输出：\n${outs.join('\n')}` : ''}`,
         data,
+      };
+    },
+  });
+
+  tools.push({
+    name: 'lingie_run_result',
+    backend: 'workflow',
+    description:
+      '查询灵姬生成任务（run_id）并取回结果：仍在生成时返回状态与进度；已完成时把输出文件下载到本地并返回文件路径列表。配合 lingie_run_workflow 超时降级后的轮询使用。',
+    inputSchema: {
+      type: 'object',
+      properties: { run_id: { type: 'string', description: 'lingie_run_workflow 返回的 run_id' } },
+      required: ['run_id'],
+      additionalProperties: false,
+    },
+    async handler({ run_id }) {
+      const cfg = await workflowConfig();
+      const res = await apiRequest(cfg.base, `/v1/runs/${encodeURIComponent(run_id)}`, {
+        headers: wfHeaders,
+        timeoutMs: 30_000,
+      });
+      const data = assertApiOk(res, '查询任务结果');
+      if (!TERMINAL_STATUSES.has(data.status)) {
+        const pct = Math.round((Number(data.progress) || 0) * 100);
+        return {
+          text: `任务 ${run_id} 仍在生成中：状态=${data.status}，进度=${pct}%。稍后再次调用本工具获取结果。`,
+          data,
+        };
+      }
+      if (data.status !== 'completed') {
+        throw new LingieError(`生成${data.status === 'failed' ? '失败' : '被取消'}: ${data.error || data.status}`, {
+          payload: data,
+        });
+      }
+      const { destDir, files } = await downloadRunOutputs(cfg.base, wfHeaders, run_id, data);
+      const lines = files.map((f) => `- [${f.kind}] ${f.filename} → ${f.path}`);
+      return {
+        text: `生成完成，输出已保存到 ${destDir}：\n${lines.join('\n') || '（工作流未返回输出文件）'}`,
+        data: { run_id, outputs_dir: destDir, files },
       };
     },
   });
@@ -565,14 +635,14 @@ async function buildTools() {
         name: 'lingie_generate_image',
         backend: 'gateway',
         description:
-          '通过灵姬网关调用第三方图片模型生成图片（按灵力值计费）。先用 lingie_list_models 选择 model_code，用 lingie_estimate_cost 估价。默认阻塞等待完成并返回本地文件路径；wait=false 立即返回 task_id。',
+          '通过灵姬网关调用第三方图片模型生成图片（按灵力值计费）。先用 lingie_list_models 选择 model_code，用 lingie_estimate_cost 估价。默认等待完成并返回本地文件路径；约 20 秒内未完成会自动降级返回 task_id（任务在后台继续，用 lingie_task_status 查询）；wait=false 立即返回 task_id。',
         inputSchema: {
           type: 'object',
           properties: {
             model_code: { type: 'string', description: '模型代码，来自 lingie_list_models' },
             params: { type: 'object', description: '模型参数（如提示词 prompt、尺寸等），按模型能力填写', additionalProperties: true },
-            wait: { type: 'boolean', description: '是否阻塞等待完成，默认 true' },
-            timeout_seconds: { type: 'integer', description: '最长等待秒数，默认 1200，最大 3600' },
+            wait: { type: 'boolean', description: '是否阻塞等待完成，默认 true（约 20 秒未完成自动降级返回，可用 LINGIE_MCP_MAX_BLOCK_MS 调整）' },
+            timeout_seconds: { type: 'integer', description: '总等待上限秒数，默认 1200，最大 3600' },
           },
           required: ['model_code'],
           additionalProperties: false,
@@ -585,14 +655,14 @@ async function buildTools() {
         name: 'lingie_generate_video',
         backend: 'gateway',
         description:
-          '通过灵姬网关调用第三方视频模型生成视频（按灵力值计费，耗时较长，建议 timeout_seconds ≥ 1800 不可超过 3600）。先用 lingie_list_models 选择 model_code。',
+          '通过灵姬网关调用第三方视频模型生成视频（按灵力值计费，耗时通常为数分钟，本工具约 20 秒后即降级返回 task_id，请用 lingie_task_status 轮询直到完成）。先用 lingie_list_models 选择 model_code。',
         inputSchema: {
           type: 'object',
           properties: {
             model_code: { type: 'string', description: '模型代码，来自 lingie_list_models' },
             params: { type: 'object', description: '模型参数（如提示词 prompt、时长、分辨率等）', additionalProperties: true },
-            wait: { type: 'boolean', description: '是否阻塞等待完成，默认 true' },
-            timeout_seconds: { type: 'integer', description: '最长等待秒数，默认 1800，最大 3600' },
+            wait: { type: 'boolean', description: '是否阻塞等待完成，默认 true（约 20 秒未完成自动降级返回，可用 LINGIE_MCP_MAX_BLOCK_MS 调整）' },
+            timeout_seconds: { type: 'integer', description: '总等待上限秒数，默认 1800，最大 3600' },
           },
           required: ['model_code'],
           additionalProperties: false,
@@ -718,19 +788,32 @@ async function runGatewayGenerate(gw, headers, engine, args, ctx, { default: def
       }
       return j;
     },
-    { timeoutS, progress: ctx.progress, signal: ctx.signal },
+    { timeoutS, progress: ctx.progress, signal: ctx.signal, blockWindowMs: MAX_BLOCK_MS },
   );
 
-  if (final.status !== 'completed') {
-    throw new LingieError(`生成${final.status === 'failed' ? '失败' : '被取消'}: ${final.error || final.status}`, {
-      payload: final,
-    });
+  if (final && TERMINAL_STATUSES.has(final.status)) {
+    if (final.status !== 'completed') {
+      throw new LingieError(`生成${final.status === 'failed' ? '失败' : '被取消'}: ${final.error || final.status}`, {
+        payload: final,
+      });
+    }
+
+    const outs = (final.outputs || []).map((p) => `- ${p}`);
+    return {
+      text: `生成完成（实际消耗 ${final.actual_cost ?? '?'} 灵力值）：\n${outs.join('\n') || '（无输出文件）'}`,
+      data: final,
+    };
   }
 
-  const outs = (final.outputs || []).map((p) => `- ${p}`);
+  // 仍在生成中：在宿主掐断调用之前主动降级，返回 task_id 让调用方轮询
+  const pct = final ? Math.round((Number(final.progress) || 0) * 100) : 0;
+  const st = final?.status ?? 'submitted';
   return {
-    text: `生成完成（实际消耗 ${final.actual_cost ?? '?'} 灵力值）：\n${outs.join('\n') || '（无输出文件）'}`,
-    data: final,
+    text:
+      `任务已提交，仍在生成中（状态 ${st}${final ? `，进度 ${pct}%` : ''}）。\n` +
+      `为避免 MCP 宿主约 30 秒的调用超时丢失结果，这里提前返回，任务在灵姬后台继续执行：task_id=${taskId}\n` +
+      `稍后用 lingie_task_status(task_id="${taskId}") 查询，完成时输出为本地文件路径。`,
+    data: { task_id: taskId, status: st, progress: pct, degraded: true },
   };
 }
 
@@ -777,7 +860,8 @@ async function main() {
   log(`  工作流 API: ${wfCfg.base}（Token ${wfCfg.token ? '已配置' : '未配置'}，settings.LocalApiEnabled=${wfCfg.enabled}）`);
   log(`  网关 API:   ${gwCfg.base}（${gwCfg.enabled ? `已启用，凭证来源: ${gwCfg.fromCredentialsFile ? '灵姬签发的 mcp-credentials.json' : '环境变量'}` : '未启用 —— 在灵姬 设置 → 本地 API 打开「Agent (MCP) 网关接入」，或设置 LINGIE_GATEWAY_APP_KEY/LINGIE_GATEWAY_USER_TOKEN'}）`);
   log(`  输出目录:   ${OUTPUT_DIR}`);
-  fileLog(`启动 v${SERVER_VERSION} pid=${process.pid} 工具=${tools.length} 工作流API=${wfCfg.base} 网关=${gwCfg.enabled ? '已启用' : '未启用'} 输出目录=${OUTPUT_DIR}${LOG_DISABLED ? ' 文件日志=已关闭' : ''}`);
+  log(`  阻塞窗口:   ${MAX_BLOCK_MS > 0 ? `${MAX_BLOCK_MS}ms（超时未完成自动降级返回 id，LINGIE_MCP_MAX_BLOCK_MS 可调，0=不限制）` : '不限制（LINGIE_MCP_MAX_BLOCK_MS=0）'}`);
+  fileLog(`启动 v${SERVER_VERSION} pid=${process.pid} 工具=${tools.length} 工作流API=${wfCfg.base} 网关=${gwCfg.enabled ? '已启用' : '未启用'} 输出目录=${OUTPUT_DIR} 阻塞窗口=${MAX_BLOCK_MS}ms${LOG_DISABLED ? ' 文件日志=已关闭' : ''}`);
 
   /** @type {Map<number, AbortController>} */
   const inflight = new Map();
