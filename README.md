@@ -23,6 +23,12 @@ AI Agent ──(MCP stdio)──> Lingie.Mcp/server.mjs ──(HTTP 127.0.0.1)�
 
 ## 接入 AI Agent
 
+把本仓库克隆到任意目录（下例假设克隆到 `C:\MCP\Lingie.Mcp`，请替换为你的实际路径）：
+
+```bash
+git clone https://github.com/MechaBabyAi/Lingie.Mcp.git C:\MCP\Lingie.Mcp
+```
+
 ### ZCode / Claude Desktop / Cursor（通用 mcpServers 格式）
 
 ```json
@@ -30,7 +36,7 @@ AI Agent ──(MCP stdio)──> Lingie.Mcp/server.mjs ──(HTTP 127.0.0.1)�
   "mcpServers": {
     "lingie": {
       "command": "node",
-      "args": ["F:\\MechBabyCodes\\TeleClawWorkspace\\Lingie.Mcp\\server.mjs"]
+      "args": ["C:\\MCP\\Lingie.Mcp\\server.mjs"]
     }
   }
 }
