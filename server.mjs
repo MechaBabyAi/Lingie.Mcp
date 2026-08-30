@@ -110,6 +110,34 @@ async function gatewayConfig() {
 
 const OUTPUT_DIR = ENV('LINGIE_MCP_OUTPUT_DIR', path.join(lingieDir, 'mcp-outputs'));
 
+// ────────────────────────────── 文件日志 ──────────────────────────────
+// 默认 %LOCALAPPDATA%\Lingie\mcp-server.log；LINGIE_MCP_LOG 指定其他路径，"off" 关闭。
+// 记录每次工具调用的开始/完成/失败，供本机审计与排障（注意: 参数里可能包含提示词等本地内容）。
+
+const LOG_FILE = ENV('LINGIE_MCP_LOG', path.join(lingieDir, 'mcp-server.log'));
+const LOG_DISABLED = LOG_FILE === 'off' || LOG_FILE === '0';
+const LOG_MAX_BYTES = 5 * 1024 * 1024; // 超过后轮转为 .old
+
+function truncForLog(s, n = 400) {
+  s = String(s);
+  return s.length > n ? s.slice(0, n) + `…(共${s.length}字符)` : s;
+}
+
+function fileLog(line) {
+  if (LOG_DISABLED) return;
+  const text = `${new Date().toISOString()} [${process.pid}] ${line}\n`;
+  (async () => {
+    try {
+      const st = await fsp.stat(LOG_FILE).catch(() => null);
+      if (st && st.size > LOG_MAX_BYTES) {
+        await fsp.rename(LOG_FILE, LOG_FILE + '.old').catch(() => {});
+      }
+      await fsp.mkdir(path.dirname(LOG_FILE), { recursive: true });
+      await fsp.appendFile(LOG_FILE, text);
+    } catch { /* 日志失败不影响服务 */ }
+  })();
+}
+
 // ────────────────────────────── HTTP 基础 ──────────────────────────────
 
 class LingieError extends Error {
@@ -749,6 +777,7 @@ async function main() {
   log(`  工作流 API: ${wfCfg.base}（Token ${wfCfg.token ? '已配置' : '未配置'}，settings.LocalApiEnabled=${wfCfg.enabled}）`);
   log(`  网关 API:   ${gwCfg.base}（${gwCfg.enabled ? `已启用，凭证来源: ${gwCfg.fromCredentialsFile ? '灵姬签发的 mcp-credentials.json' : '环境变量'}` : '未启用 —— 在灵姬 设置 → 本地 API 打开「Agent (MCP) 网关接入」，或设置 LINGIE_GATEWAY_APP_KEY/LINGIE_GATEWAY_USER_TOKEN'}）`);
   log(`  输出目录:   ${OUTPUT_DIR}`);
+  fileLog(`启动 v${SERVER_VERSION} pid=${process.pid} 工具=${tools.length} 工作流API=${wfCfg.base} 网关=${gwCfg.enabled ? '已启用' : '未启用'} 输出目录=${OUTPUT_DIR}${LOG_DISABLED ? ' 文件日志=已关闭' : ''}`);
 
   /** @type {Map<number, AbortController>} */
   const inflight = new Map();
@@ -836,10 +865,14 @@ async function main() {
               }
             : null,
         };
+        const callStart = Date.now();
+        fileLog(`调用开始 tool=${name} 参数=${truncForLog(JSON.stringify(args))}`);
         try {
           const r = await tool.handler(args, ctx);
+          fileLog(`调用完成 tool=${name} 耗时=${Date.now() - callStart}ms`);
           rpcResult(id, toolResult(r.text, { data: r.data }));
         } catch (err) {
+          fileLog(`调用失败 tool=${name} 耗时=${Date.now() - callStart}ms 错误=${err?.message ?? err}`);
           log(`工具 ${name} 执行失败: ${err?.stack || err}`);
           rpcResult(id, toolErrorMessage(err));
         } finally {

@@ -89,6 +89,7 @@ node Lingie.Mcp/server.mjs
 | `LINGIE_API_PORT` | settings.json 的 `LocalApiPort`（默认 17856） | 工作流 API 端口 |
 | `LINGIE_API_TOKEN` | settings.json 的 `LocalApiBearerToken` | 工作流 API Bearer Token |
 | `LINGIE_MCP_OUTPUT_DIR` | `%LOCALAPPDATA%\Lingie\mcp-outputs` | 输出文件下载目录 |
+| `LINGIE_MCP_LOG` | `%LOCALAPPDATA%\Lingie\mcp-server.log` | 本地文件日志路径，设为 `off` 关闭；超 5MB 自动轮转为 `.old` |
 | `LINGIE_GATEWAY_APP_KEY` | 灵姬签发的 `mcp-credentials.json` | 网关 AppKey（与 `LINGIE_GATEWAY_USER_TOKEN` 一起设置后启用网关工具） |
 | `LINGIE_GATEWAY_USER_TOKEN` | 无 | 网关 Bearer 用户令牌 |
 | `LINGIE_GATEWAY_PORT` / `LINGIE_GATEWAY_URL` | `%LOCALAPPDATA%\Lingie\api_server.json` 的 `api_port`（默认 58100） | 网关地址 |
@@ -110,3 +111,14 @@ node Lingie.Mcp/server.mjs
 - **`lingie_cancel_run` 是全局中断**：本地 ComfyUI 一次只执行一个任务，取消会中断当前正在执行的任务（灵姬 `LocalApiService` 的行为，MCP 侧已在工具描述中向 Agent 说明）。
 - **工作流与授权**：非免费工作流需要灵姬内有效的授权（`IsFree` / 许可校验），由灵姬自行处理。
 - 生成的输出文件默认保存在 `%LOCALAPPDATA%\Lingie\mcp-outputs\{run_id}\`，灵姬侧 ComfyUI 原始输出仍在 `Comfy_User/Comfy_Output`。
+
+## 日志
+
+MCP 服务器被 Agent 拉起后 stderr 不可见，因此所有工具调用都会追加写入本地日志文件（默认 `%LOCALAPPDATA%\Lingie\mcp-server.log`），每次调用记录三行信息：
+
+```
+2026-08-30T12:00:00.000Z [12345] 调用开始 tool=lingie_run_workflow 参数={"workflow_id":"WF-..."}
+2026-08-30T12:03:21.000Z [12345] 调用完成 tool=lingie_run_workflow 耗时=201000ms
+```
+
+失败时记录 `调用失败 ... 错误=<原因>`。日志仅存本机，注意其中可能包含提示词等创作内容；用 `LINGIE_MCP_LOG=off` 可关闭。灵姬侧 58100 网关任务会出现在灵姬任务列表（来源 `lingie-mcp`），17856 工作流任务只体现在 ComfyUI 队列与输出目录。
