@@ -213,7 +213,7 @@ async function downloadOutput(base, headers, runId, out, destDir) {
   if (!res.ok || !res.body) {
     throw new LingieError(`下载输出失败 (index=${out.index}): HTTP ${res.status}`);
   }
-  await pipeline(Readable.fromWeb(res.body), fsp.createWriteStream(dest));
+  await pipeline(Readable.fromWeb(res.body), fs.createWriteStream(dest));
   return dest;
 }
 
@@ -390,7 +390,8 @@ async function buildTools() {
       const submitRes = await apiRequest(cfg.base, `/v1/workflows/${encodeURIComponent(workflow_id)}/runs`, {
         method: 'POST',
         headers: wfHeaders,
-        body: params,
+        // 本地 API 约定请求体为 { parameters: {...} }, 裸 params 会被判为"已收到: 无"
+        body: { parameters: params },
         timeoutMs: 120_000,
       });
       const submitted = assertApiOk(submitRes, '提交生成任务');
