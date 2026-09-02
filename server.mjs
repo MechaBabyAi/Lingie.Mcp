@@ -28,7 +28,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 
 const SERVER_NAME = 'lingie-mcp';
-const SERVER_VERSION = '0.2.0';
+const SERVER_VERSION = '0.3.0';
 const KNOWN_PROTOCOL_VERSIONS = ['2024-11-05', '2025-03-26', '2025-06-18'];
 const LATEST_PROTOCOL_VERSION = '2025-06-18';
 
@@ -346,7 +346,7 @@ async function buildTools() {
       return {
         text:
           `灵姬本地 API 在线（端口 ${cfg.port}）。\n` +
-          `- 本地 ComfyUI 引擎: ${data.comfyui_running ? '运行中' : '未运行（生成时会自动启动，首次可能较慢）'}\n` +
+          `- 本地 ComfyUI 引擎: ${data.comfyui_running ? '运行中' : '未运行（提交工作流时会自动拉起，首次启动约 30-120 秒）'}\n` +
           `- Token 认证: ${data.auth_required ? '已启用' : '未启用'}`,
         data,
       };
@@ -417,7 +417,7 @@ async function buildTools() {
     name: 'lingie_run_workflow',
     backend: 'workflow',
     description:
-      '在灵姬中执行一个工作流（本地 ComfyUI 引擎）。提交后默认等待完成并返回输出文件的本地路径；若约 20 秒内未完成（MCP 宿主对单次调用通常只有 ~30 秒超时，超时会被掐断丢结果），自动降级为返回 run_id，任务在后台继续，用 lingie_run_result 轮询并在完成后取回本地文件。设 wait=false 立即返回 run_id。取消用 lingie_cancel_run（注意：会中断本地引擎当前正在执行的任务）。',
+      '在灵姬中执行一个工作流（本地 ComfyUI 引擎）。引擎未运行时会自动拉起（首次启动约 30-120 秒，后续提交无需等待）。提交后默认等待完成并返回输出文件的本地路径；若约 20 秒内未完成（MCP 宿主对单次调用通常只有 ~30 秒超时，超时会被掐断丢结果），自动降级为返回 run_id，任务在后台继续，用 lingie_run_result 轮询并在完成后取回本地文件。设 wait=false 立即返回 run_id。取消用 lingie_cancel_run（注意：会中断本地引擎当前正在执行的任务）。',
     inputSchema: {
       type: 'object',
       properties: {

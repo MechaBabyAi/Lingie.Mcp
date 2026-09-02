@@ -1,3 +1,14 @@
+---
+AIGC:
+  ContentProducer: '001191110102MAD55U9H0F10002'
+  ContentPropagator: '001191110102MAD55U9H0F10002'
+  Label: '1'
+  ProduceID: 'e3479609-3a7f-4da5-910c-3d6772bafbbb'
+  PropagateID: 'e3479609-3a7f-4da5-910c-3d6772bafbbb'
+  ReservedCode1: 'd5b9ea48-a52b-478e-a3ea-b3564fe91671'
+  ReservedCode2: 'd5b9ea48-a52b-478e-a3ea-b3564fe91671'
+---
+
 # Lingie.Mcp — 灵姬 MCP 服务器
 
 把灵姬客户端（`Lingie.BlazorHybrid`）的生成能力封装成 [MCP](https://modelcontextprotocol.io)（Model Context Protocol）工具，让任何支持 MCP 的 AI Agent（ZCode、Claude Desktop、Cursor 等）可以直接调用灵姬**生成图片、视频、音频**。
@@ -20,6 +31,7 @@ AI Agent ──(MCP stdio)──> Lingie.Mcp/server.mjs ──(HTTP 127.0.0.1)�
 1. 灵姬客户端正在运行。
 2. 在灵姬 **设置 → 本地 API** 中开启「外部工作流 API」（对应 `%LOCALAPPDATA%\Lingie\settings.json` 的 `LocalApiEnabled`，端口 `LocalApiPort` 默认 `17856`）。
 3. 若设置了 `LocalApiBearerToken`，MCP 服务器会自动读取；也可用环境变量 `LINGIE_API_TOKEN` 显式覆盖。
+4. **无需手动启动 ComfyUI 引擎**：提交工作流时若引擎未运行，灵姬会自动拉起（首次约 30-120 秒）。
 
 ## 接入 AI Agent
 
@@ -62,10 +74,10 @@ node Lingie.Mcp/server.mjs
 
 | 工具 | 说明 |
 |---|---|
-| `lingie_health` | 检查灵姬本地 API 与本地 ComfyUI 引擎是否在线 |
+| `lingie_health` | 检查灵姬本地 API 与本地 ComfyUI 引擎是否在线（未运行时提交会自动拉起） |
 | `lingie_list_workflows` | 列出可用工作流（图片/视频/音频生成等） |
 | `lingie_workflow_capabilities` | 查看某工作流的参数模式（类型/必填/默认值/可选值/提交方式） |
-| `lingie_run_workflow` | 执行工作流：约 20 秒内完成则直接返回输出文件**本地绝对路径**，否则自动降级返回 `run_id`（任务后台继续）；`wait=false` 可立即异步提交 |
+| `lingie_run_workflow` | 执行工作流：引擎未运行时自动拉起（首次约 30-120 秒）；约 20 秒内完成则直接返回输出文件**本地绝对路径**，否则自动降级返回 `run_id`（任务后台继续）；`wait=false` 可立即异步提交 |
 | `lingie_run_result` | 轮询 `run_id` 并取回结果：完成时下载输出并以本地路径返回（配合降级流程使用） |
 | `lingie_run_status` | 查询任务状态与进度（不下载输出） |
 | `lingie_cancel_run` | 取消任务（注意：会中断本地引擎当前正在执行的任务） |
@@ -99,7 +111,7 @@ node Lingie.Mcp/server.mjs
 ## Agent 典型调用流程
 
 ```
-1. lingie_health                          → 确认灵姬在线
+1. lingie_health                          → 确认灵姬在线（引擎未运行也可提交，会自拉起）
 2. lingie_list_workflows                  → 找到想用的工作流（如"文生图"）
 3. lingie_workflow_capabilities           → 了解参数怎么填
 4. （可选）lingie_upload_file              → 图生图先上传参考图
@@ -118,6 +130,8 @@ node Lingie.Mcp/server.mjs
 ## 已知限制
 
 - **工作流 API 只走本地 ComfyUI 引擎**：云端 ComfyUI / 第三方模型（Kling 等计费模型）需走网关工具。网关凭证在灵姬 设置 → 本地 API → 「Agent (MCP) 网关接入」一键签发（写入 `mcp-credentials.json`），或由管理员通过环境变量提供。
+- **引擎自动拉起**：通过 MCP 提交工作流时，若本地 ComfyUI 引擎未运行，灵姬会自动拉起（`ComfyUIService.EnsureRunningAsync`）。首次启动约 30-120 秒（加载 custom nodes），后续提交无需等待。如果文件指纹校验失败（`FingerprintBlocked`），自拉起会中止并返回错误，需在灵姬 UI 中修复 ComfyUI 路径配置。
+- **启动参数与脱敏补丁不可通过外部修改**：ComfyUI 进程的启动参数（`--port`、`--disable-metadata`、`--preview-method none` 等）由灵姬 C# 端 `BuildComfyUIArguments` 硬编码构建，外部 API 调用者只能提交工作流节点参数（提示词、图片、尺寸等），不接触进程启动参数。安全补丁（`server.py` / `prompt_pipe_server.py`）和 Named Pipe 提交通道也由灵姬内部管理，外部无法篡改。
 - **`lingie_cancel_run` 是全局中断**：本地 ComfyUI 一次只执行一个任务，取消会中断当前正在执行的任务（灵姬 `LocalApiService` 的行为，MCP 侧已在工具描述中向 Agent 说明）。
 - **工作流与授权**：非免费工作流需要灵姬内有效的授权（`IsFree` / 许可校验），由灵姬自行处理。
 - 生成的输出文件默认保存在 `%LOCALAPPDATA%\Lingie\mcp-outputs\{run_id}\`，灵姬侧 ComfyUI 原始输出仍在 `Comfy_User/Comfy_Output`。
