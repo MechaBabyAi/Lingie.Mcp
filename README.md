@@ -1,14 +1,3 @@
----
-AIGC:
-  ContentProducer: '001191110102MAD55U9H0F10002'
-  ContentPropagator: '001191110102MAD55U9H0F10002'
-  Label: '1'
-  ProduceID: 'e3479609-3a7f-4da5-910c-3d6772bafbbb'
-  PropagateID: 'e3479609-3a7f-4da5-910c-3d6772bafbbb'
-  ReservedCode1: 'd5b9ea48-a52b-478e-a3ea-b3564fe91671'
-  ReservedCode2: 'd5b9ea48-a52b-478e-a3ea-b3564fe91671'
----
-
 # Lingie.Mcp — 灵姬 MCP 服务器
 
 把灵姬客户端（`Lingie.BlazorHybrid`）的生成能力封装成 [MCP](https://modelcontextprotocol.io)（Model Context Protocol）工具，让任何支持 MCP 的 AI Agent（ZCode、Claude Desktop、Cursor 等）可以直接调用灵姬**生成图片、视频、音频**。
