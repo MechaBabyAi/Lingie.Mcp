@@ -68,7 +68,11 @@ node Lingie.Mcp/server.mjs
 | `lingie_restart_comfyui` | 同参数重启 ComfyUI（勿外部 taskkill；CUDA 死锁时用） |
 | `lingie_comfy_queue` | ComfyUI 队列（仅 prompt_id） |
 | `lingie_comfy_progress` | 指定 run_id 的 WS/队列/history 进度（不含 workflow 图） |
-| `lingie_list_workflows` | 列出可用工作流（图片/视频/音频生成等） |
+| `lingie_comfy_log` | ComfyUI 日志尾部（灵姬内存缓冲） |
+| `lingie_comfy_result` | run_id 产物路径 + ffprobe 元数据 |
+| `lingie_comfy_system_stats` | ComfyUI 版本 / GPU 显存摘要 |
+| `lingie_comfy_node_types` | 已注册节点 class_type 名列表 |
+| `lingie_list_workflows` | 列出可用工作流（含 display_title / version_label / id） |
 | `lingie_workflow_capabilities` | 查看某工作流的参数模式（类型/必填/默认值/可选值/提交方式） |
 | `lingie_run_workflow` | 执行工作流：引擎未运行时自动拉起（首次约 30-120 秒）；约 20 秒内完成则直接返回输出文件**本地绝对路径**，否则自动降级返回 `run_id`（任务后台继续）；`wait=false` 可立即异步提交 |
 | `lingie_run_result` | 轮询 `run_id` 并取回结果：完成时下载输出并以本地路径返回（配合降级流程使用） |

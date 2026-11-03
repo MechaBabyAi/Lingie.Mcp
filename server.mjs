@@ -442,6 +442,75 @@ async function buildTools() {
   });
 
   tools.push({
+    name: 'lingie_comfy_log',
+    backend: 'workflow',
+    description: '读取灵姬侧 ComfyUI 运行日志尾部（stdout/stderr/应用日志），非固定磁盘路径。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tail_lines: { type: 'integer', description: '返回最后 N 行，默认 200，最大 2000' },
+      },
+      additionalProperties: false,
+    },
+    async handler({ tail_lines = 200 }) {
+      const cfg = await workflowConfig();
+      const q = Number.isFinite(tail_lines) ? `?tail_lines=${Math.min(2000, Math.max(1, tail_lines))}` : '';
+      const res = await apiRequest(cfg.base, `/v1/comfyui/log${q}`, { headers: wfHeaders, timeoutMs: 15_000 });
+      const data = assertApiOk(res, '读取 ComfyUI 日志');
+      return { text: `最近 ${data.count ?? 0} 行日志`, data };
+    },
+  });
+
+  tools.push({
+    name: 'lingie_comfy_result',
+    backend: 'workflow',
+    description:
+      '查询 run_id 的产物元信息（路径、大小、ffprobe 宽高/时长/帧率等）。不含 Comfy workflow 图。',
+    inputSchema: {
+      type: 'object',
+      properties: { run_id: { type: 'string', description: 'prompt_id / run_id' } },
+      required: ['run_id'],
+      additionalProperties: false,
+    },
+    async handler({ run_id }) {
+      const cfg = await workflowConfig();
+      const res = await apiRequest(cfg.base, `/v1/runs/${encodeURIComponent(run_id)}/result`, {
+        headers: wfHeaders,
+        timeoutMs: 60_000,
+      });
+      const data = assertApiOk(res, '查询产物');
+      const n = Array.isArray(data.files) ? data.files.length : 0;
+      return { text: `run ${run_id}: ${data.status ?? '?'}, ${n} 个输出文件`, data };
+    },
+  });
+
+  tools.push({
+    name: 'lingie_comfy_system_stats',
+    backend: 'workflow',
+    description: 'ComfyUI system_stats 摘要：版本号、GPU 显存等（不含 workflow）。',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    async handler() {
+      const cfg = await workflowConfig();
+      const res = await apiRequest(cfg.base, '/v1/comfyui/system_stats', { headers: wfHeaders, timeoutMs: 15_000 });
+      const data = assertApiOk(res, 'system_stats');
+      return { text: data.ok ? `ComfyUI ${data.comfyui_version ?? '?'}` : `失败: ${data.error}`, data };
+    },
+  });
+
+  tools.push({
+    name: 'lingie_comfy_node_types',
+    backend: 'workflow',
+    description: '已注册的 ComfyUI 节点 class_type 名称列表（object_info 键名），用于排查缺节点；不含节点图或参数 schema。',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    async handler() {
+      const cfg = await workflowConfig();
+      const res = await apiRequest(cfg.base, '/v1/comfyui/node_types', { headers: wfHeaders, timeoutMs: 120_000 });
+      const data = assertApiOk(res, 'node_types');
+      return { text: `共 ${data.count ?? 0} 个节点类型${data.truncated ? '（已截断）' : ''}`, data };
+    },
+  });
+
+  tools.push({
     name: 'lingie_list_workflows',
     backend: 'workflow',
     description:
@@ -453,11 +522,13 @@ async function buildTools() {
       const list = assertApiOk(res, '获取工作流列表');
       const lines = (Array.isArray(list) ? list : []).map((w) => {
         const id = pick(w, 'Id', 'id');
-        const name = pick(w, 'Name', 'name');
+        const title = pick(w, 'display_title', 'displayTitle') ?? pick(w, 'Name', 'name');
+        const vlabel = pick(w, 'version_label', 'versionLabel');
         const cat = pick(w, 'Category', 'category') ?? '?';
         const desc = pick(w, 'Description', 'description') ?? '';
         const free = pick(w, 'IsFree', 'isFree', 'is_free');
-        return `- [${cat}] ${name}（id=${id}${free ? ', 免费' : ', 需授权'}）${desc ? ` — ${desc}` : ''}`;
+        const verHint = vlabel ? `, 版本=${vlabel}` : '';
+        return `- [${cat}] ${title}（id=${id}${verHint}${free ? ', 免费' : ', 需授权'}）${desc ? ` — ${desc}` : ''}`;
       });
       return {
         text: lines.length ? `共 ${lines.length} 个工作流：\n${lines.join('\n')}` : '当前没有可用工作流。',
