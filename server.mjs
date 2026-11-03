@@ -346,8 +346,96 @@ async function buildTools() {
       return {
         text:
           `灵姬本地 API 在线（端口 ${cfg.port}）。\n` +
-          `- 本地 ComfyUI 引擎: ${data.comfyui_running ? '运行中' : '未运行（提交工作流时会自动拉起，首次启动约 30-120 秒）'}\n` +
+          `- 本地 ComfyUI 引擎: ${data.comfyui_running ? '运行中' : '未运行'}\n` +
+          `- 自拉起: 本工具不启动引擎；请用 lingie_ensure_comfyui 或 lingie_run_workflow 提交（${data.auto_start_trigger ?? 'POST /v1/comfyui/ensure'}）\n` +
           `- Token 认证: ${data.auth_required ? '已启用' : '未启用'}`,
+        data,
+      };
+    },
+  });
+
+  tools.push({
+    name: 'lingie_ensure_comfyui',
+    backend: 'workflow',
+    description:
+      '显式拉起本地 ComfyUI 引擎（走灵姬 StartAsync，含杀冲突旧进程）。health 只查询状态，不启动；长时间链式生成前可先调用本工具。',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    async handler() {
+      const cfg = await workflowConfig();
+      const res = await apiRequest(cfg.base, '/v1/comfyui/ensure', {
+        method: 'POST',
+        headers: wfHeaders,
+        timeoutMs: 180_000,
+      });
+      const data = assertApiOk(res, '拉起 ComfyUI');
+      return {
+        text: data.ok
+          ? 'ComfyUI 已就绪。'
+          : `ComfyUI 拉起失败: ${data.message || data.error || '未知错误'}`,
+        data,
+      };
+    },
+  });
+
+  tools.push({
+    name: 'lingie_restart_comfyui',
+    backend: 'workflow',
+    description:
+      '通过灵姬重启本地 ComfyUI（同参数杀旧再起，保持日志与状态一致）。勿在外部 taskkill。CUDA 死锁且 cancel 无效时使用。不会自动取消 MCP 语义上的「看门狗干预」。',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    async handler() {
+      const cfg = await workflowConfig();
+      const res = await apiRequest(cfg.base, '/v1/comfyui/restart', {
+        method: 'POST',
+        headers: wfHeaders,
+        timeoutMs: 180_000,
+      });
+      const data = assertApiOk(res, '重启 ComfyUI');
+      return {
+        text: data.ok
+          ? `ComfyUI 已重启（port=${data.port}, new_pid=${data.new_pid ?? '?'}, ${data.started_ms}ms）。`
+          : `重启失败: ${data.error || '未知'}`,
+        data,
+      };
+    },
+  });
+
+  tools.push({
+    name: 'lingie_comfy_queue',
+    backend: 'workflow',
+    description: '查询 ComfyUI 队列（仅 prompt_id，不含工作流图）。',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    async handler() {
+      const cfg = await workflowConfig();
+      const res = await apiRequest(cfg.base, '/v1/comfyui/queue', { headers: wfHeaders, timeoutMs: 15_000 });
+      const data = assertApiOk(res, '查询队列');
+      return { text: `队列深度 ${data.depth ?? 0}（running ${data.running?.length ?? 0}, pending ${data.pending?.length ?? 0}）`, data };
+    },
+  });
+
+  tools.push({
+    name: 'lingie_comfy_progress',
+    backend: 'workflow',
+    description:
+      '查询指定 prompt_id（run_id）的执行进度：WS 整体进度、队列位置、history 是否已完成。不返回 ComfyUI workflow prompt 图。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        prompt_id: { type: 'string', description: 'lingie_run_workflow 返回的 run_id / prompt_id' },
+      },
+      required: ['prompt_id'],
+      additionalProperties: false,
+    },
+    async handler({ prompt_id }) {
+      const cfg = await workflowConfig();
+      const res = await apiRequest(
+        cfg.base,
+        `/v1/comfyui/progress?prompt_id=${encodeURIComponent(prompt_id)}`,
+        { headers: wfHeaders, timeoutMs: 15_000 },
+      );
+      const data = assertApiOk(res, '查询进度');
+      return {
+        text: `prompt ${prompt_id}: ${data.execution_state}, progress=${data.overall_progress}, completed=${data.completed}`,
         data,
       };
     },
@@ -452,7 +540,7 @@ async function buildTools() {
 
       if (!wait) {
         return {
-          text: `已提交灵姬生成任务：run_id=${runId}（状态 ${submitted.status}）。\n用 lingie_run_status(run_id="${runId}") 查询进度，lingie_cancel_run 取消。`,
+          text: `已提交灵姬生成任务：run_id=${runId} prompt_id=${submitted.prompt_id ?? runId}（${submitted.status}）。\n用 lingie_run_status / lingie_comfy_progress 查进度；取消用 lingie_cancel_run；死锁用 lingie_restart_comfyui。`,
           data: submitted,
         };
       }
@@ -503,7 +591,8 @@ async function buildTools() {
   tools.push({
     name: 'lingie_run_status',
     backend: 'workflow',
-    description: '查询灵姬生成任务（run_id）的当前状态、进度与输出清单（只查询，不下载输出文件）。',
+    description:
+      '查询灵姬生成任务（run_id）的当前状态、进度与输出清单（只查询，不下载输出文件）。状态合并 ComfyUI /history 与 WS 进度；不返回 workflow prompt 图。',
     inputSchema: {
       type: 'object',
       properties: { run_id: { type: 'string', description: 'lingie_run_workflow 返回的 run_id' } },
@@ -515,8 +604,9 @@ async function buildTools() {
       const res = await apiRequest(cfg.base, `/v1/runs/${encodeURIComponent(run_id)}`, { headers: wfHeaders });
       const data = assertApiOk(res, '查询任务状态');
       const outs = (data.outputs || []).map((o) => `- [${o.kind}] ${o.filename}（${o.download_url}）`);
+      const extra = data.status_str ? ` status_str=${data.status_str}` : '';
       return {
-        text: `任务 ${run_id}：状态=${data.status}，进度=${Math.round((Number(data.progress) || 0) * 100)}%${data.error ? `，错误=${data.error}` : ''}${outs.length ? `\n输出：\n${outs.join('\n')}` : ''}`,
+        text: `任务 ${run_id}：状态=${data.status}${extra}，进度=${Math.round((Number(data.progress) || 0) * 100)}%${data.completed ? '，已完成' : ''}${data.error ? `，错误=${data.error}` : ''}${outs.length ? `\n输出：\n${outs.join('\n')}` : ''}`,
         data,
       };
     },
@@ -565,7 +655,7 @@ async function buildTools() {
     name: 'lingie_cancel_run',
     backend: 'workflow',
     description:
-      '取消一个灵姬生成任务。注意：本地 ComfyUI 引擎一次只执行一个任务，取消操作会中断当前正在执行的任务（不一定是该 run_id 对应的任务）。请确认后再调用。',
+      '取消一个灵姬生成任务：转发 ComfyUI /interrupt 并尝试从队列删除该 prompt_id。CUDA 死锁时可能无效，需 lingie_restart_comfyui。本地引擎一次只跑一个任务，interrupt 会打断当前 executing。',
     inputSchema: {
       type: 'object',
       properties: { run_id: { type: 'string', description: '要取消的 run_id' } },
@@ -579,7 +669,10 @@ async function buildTools() {
         headers: wfHeaders,
       });
       const data = assertApiOk(res, '取消任务');
-      return { text: `已请求取消任务 ${run_id}（状态: ${data.status}）。`, data };
+      return {
+        text: `已请求取消 ${run_id}。interrupt 已发送；队列 pending=${data.still_in_queue_pending} running=${data.still_in_queue_running}。${data.note || ''}`,
+        data,
+      };
     },
   });
 

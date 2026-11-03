@@ -63,13 +63,17 @@ node Lingie.Mcp/server.mjs
 
 | 工具 | 说明 |
 |---|---|
-| `lingie_health` | 检查灵姬本地 API 与本地 ComfyUI 引擎是否在线（未运行时提交会自动拉起） |
+| `lingie_health` | 检查灵姬本地 API 与 ComfyUI 是否在线（**不**自拉起；见 `lingie_ensure_comfyui`） |
+| `lingie_ensure_comfyui` | 显式拉起本地 ComfyUI（灵姬 `EnsureRunningAsync`） |
+| `lingie_restart_comfyui` | 同参数重启 ComfyUI（勿外部 taskkill；CUDA 死锁时用） |
+| `lingie_comfy_queue` | ComfyUI 队列（仅 prompt_id） |
+| `lingie_comfy_progress` | 指定 run_id 的 WS/队列/history 进度（不含 workflow 图） |
 | `lingie_list_workflows` | 列出可用工作流（图片/视频/音频生成等） |
 | `lingie_workflow_capabilities` | 查看某工作流的参数模式（类型/必填/默认值/可选值/提交方式） |
 | `lingie_run_workflow` | 执行工作流：引擎未运行时自动拉起（首次约 30-120 秒）；约 20 秒内完成则直接返回输出文件**本地绝对路径**，否则自动降级返回 `run_id`（任务后台继续）；`wait=false` 可立即异步提交 |
 | `lingie_run_result` | 轮询 `run_id` 并取回结果：完成时下载输出并以本地路径返回（配合降级流程使用） |
-| `lingie_run_status` | 查询任务状态与进度（不下载输出） |
-| `lingie_cancel_run` | 取消任务（注意：会中断本地引擎当前正在执行的任务） |
+| `lingie_run_status` | 查询任务状态与进度（合并 history + WS；不返回 Comfy prompt 图） |
+| `lingie_cancel_run` | 取消：`/interrupt` + 删队列项；死锁时需 `lingie_restart_comfyui` |
 | `lingie_upload_file` | 上传本地文件到 ComfyUI 输入目录（供图生图/参考图/首帧等参数使用） |
 
 当网关凭证可用时（二选一），额外暴露「AI 应用网关」（`:58100`）工具，覆盖本地/云端 ComfyUI 与第三方模型（DALL·E、Midjourney、Seedream、Kling、Vidu、Wan 等，按灵力值计费）：
