@@ -391,9 +391,13 @@ async function buildTools() {
         timeoutMs: 180_000,
       });
       const data = assertApiOk(res, '重启 ComfyUI');
+      const killNote =
+        data.old_pid_source && data.old_pid_source !== 'lingie_managed'
+          ? ` old_pid_source=${data.old_pid_source} killed=${data.killed}`
+          : '';
       return {
         text: data.ok
-          ? `ComfyUI 已重启（port=${data.port}, new_pid=${data.new_pid ?? '?'}, ${data.started_ms}ms）。`
+          ? `ComfyUI 已重启（port=${data.port}, old_pid=${data.old_pid ?? 'null'}, new_pid=${data.new_pid ?? '?'}, ${data.started_ms}ms${killNote}）。${data.note || ''}`
           : `重启失败: ${data.error || '未知'}`,
         data,
       };
@@ -675,9 +679,9 @@ async function buildTools() {
       const res = await apiRequest(cfg.base, `/v1/runs/${encodeURIComponent(run_id)}`, { headers: wfHeaders });
       const data = assertApiOk(res, '查询任务状态');
       const outs = (data.outputs || []).map((o) => `- [${o.kind}] ${o.filename}（${o.download_url}）`);
-      const extra = data.status_str ? ` status_str=${data.status_str}` : '';
+      const comfy = data.status_str ? ` Comfy=${data.status_str}` : '';
       return {
-        text: `任务 ${run_id}：状态=${data.status}${extra}，进度=${Math.round((Number(data.progress) || 0) * 100)}%${data.completed ? '，已完成' : ''}${data.error ? `，错误=${data.error}` : ''}${outs.length ? `\n输出：\n${outs.join('\n')}` : ''}`,
+        text: `任务 ${run_id}：状态=${data.status}${comfy}，进度=${Math.round((Number(data.progress) || 0) * 100)}%${data.completed ? '，已完成' : ''}${data.error ? `，错误=${data.error}` : ''}${outs.length ? `\n输出：\n${outs.join('\n')}` : ''}`,
         data,
       };
     },
